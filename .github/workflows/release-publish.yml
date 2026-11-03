@@ -109,7 +109,7 @@ jobs:
           $notes = @"
           # wshim $env:TAG
 
-          Official binaries built by the release-build workflow from tag `$env:TAG`.
+          Official binaries built by the release-build workflow from tag $($env:TAG).
 
           - Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:RUN_ID
           - Runner: $($manifest.image_os) / $($manifest.image_version)
@@ -120,7 +120,7 @@ jobs:
             - `wshim-w.exe`: $($manifest.hash_w)
           - Size: $($manifest.binary_c.size) bytes; imports: $($manifest.binary_c.imports -join ', '); sections: $($manifest.binary_c.sections -join ', ')
           - PDB files: $($manifest.binary_c.pdb_files); debug directory: $($manifest.binary_c.debug_directory); COFF symbols: $($manifest.binary_c.coff_symbols); /rustc/ path strings: $($manifest.binary_c.rustc_paths); PE timestamp: $($manifest.binary_c.pe_time)
-          - Attestation: `gh attestation verify <file> --repo $env:GITHUB_REPOSITORY --signer-workflow $env:GITHUB_REPOSITORY/.github/workflows/release-build.yml --source-digest $($manifest.commit) --source-ref refs/tags/$env:TAG`
+          - Attestation: `gh attestation verify <file> --repo $env:GITHUB_REPOSITORY --signer-workflow $env:GITHUB_REPOSITORY/.github/workflows/release-build.yml --source-digest $($manifest.commit) --source-ref refs/tags/$($env:TAG)`
 
           Reproducibility: the build CI performed A/B builds; this release CI rebuilt and compared. This is same-image, best-effort reproducibility; cross-environment bit-for-bit identity is not guaranteed.
 
