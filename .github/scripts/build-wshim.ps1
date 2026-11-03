@@ -6,7 +6,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$toolchain = '1.99.1-x86_64-pc-windows-msvc'
 $target = 'x86_64-pc-windows-msvc'
 $root = Join-Path $env:RUNNER_TEMP ('wshim-release-' + [guid]::NewGuid().ToString('N'))
 $copyA = Join-Path $root 'a'
@@ -64,7 +63,7 @@ function Build-One([string]$Copy) {
 
     Push-Location $Copy
     try {
-        & rustup run $toolchain cargo build --release --locked --target $target -j 1
+        & cargo build --release --locked --target $target -j 1
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed in $Copy"
         }
@@ -91,6 +90,7 @@ Write-Step "tag $Tag"
 Write-Step "repo $RepoRoot"
 $env:SOURCE_DATE_EPOCH = '0'
 $env:CARGO_INCREMENTAL = '0'
+$env:RUSTUP_AUTO_INSTALL = '1'
 Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
 Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
 
@@ -114,6 +114,12 @@ Copy-Item -LiteralPath $a.W -Destination (Join-Path $OutputDir 'wshim-w.exe')
 ) | Set-Content -LiteralPath (Join-Path $OutputDir 'sha256.txt') -Encoding ascii
 
 $commit = (& git -C $RepoRoot rev-parse HEAD).Trim()
+Push-Location $copyA
+$activeToolchain = ((& rustup show active-toolchain) -join ' ').Trim()
+$rustc = ((& rustc -Vv) -join ' | ')
+$cargo = (& cargo -V)
+Pop-Location
+$toolchainName = ($activeToolchain -split '\s+')[0]
 $link = Get-LinkInfo
 $manifest = [ordered]@{
     tag = $Tag
@@ -122,9 +128,9 @@ $manifest = [ordered]@{
     image_os = $env:ImageOS
     image_version = $env:ImageVersion
     target = $target
-    toolchain = $toolchain
-    rustc = ((& rustup run $toolchain rustc -Vv) -join ' | ')
-    cargo = (& rustup run $toolchain cargo -V)
+    toolchain = $toolchainName
+    rustc = $rustc
+    cargo = $cargo
     visual_studio = $link.visual_studio
     link_version = $link.link_version
     sdks = @($link.sdks)

@@ -23,10 +23,10 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
-      - name: Install pinned Rust
+      - name: Show pinned Rust
         shell: pwsh
         run: |
-          rustup toolchain install 1.99.1-x86_64-pc-windows-msvc --profile minimal --no-self-update
+          rustup show
 
       - name: Build two independent paths
         shell: pwsh

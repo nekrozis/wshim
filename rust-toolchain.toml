@@ -1,3 +1,4 @@
+# Single source of truth for the Rust toolchain. Update here.
 [toolchain]
 channel = "1.99.1"
 profile = "minimal"
