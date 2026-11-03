@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
@@ -35,13 +35,13 @@ jobs:
         run: |
           ./.github/scripts/build-wshim.ps1 -Tag $env:TAG -OutputDir artifacts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wshim-${{ inputs.tag || github.ref_name }}
           path: artifacts
           if-no-files-found: error
 
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             artifacts/wshim-c.exe

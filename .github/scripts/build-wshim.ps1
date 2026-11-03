@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [Parameter(Mandatory = $true)][string]$OutputDir,
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
+    [int]$MaxSize = 327680
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +37,62 @@ function Get-Leaks([string]$Path, [string]$Copy) {
     return @($needles | Where-Object { $text.Contains($_) } | Select-Object -Unique)
 }
 
+function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy, [int]$MaxSize) {
+    $size = (Get-Item -LiteralPath $Path).Length
+    if ($size -gt $MaxSize) {
+        throw "binary too large: $Path = $size bytes > $MaxSize"
+    }
+
+    $dependents = @(& $Dumpbin /dependents $Path)
+    $imports = @($dependents | ForEach-Object {
+        if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] }
+    })
+    $allowed = @('KERNEL32.dll', 'ntdll.dll', 'api-ms-win-core-synch-l1-2-0.dll')
+    $unexpected = @($imports | Where-Object { $allowed -notcontains $_ })
+    if ($unexpected.Count -gt 0) {
+        throw ("unexpected imports in $Path : " + ($unexpected -join ', '))
+    }
+
+    $headers = @(& $Dumpbin /headers $Path)
+    $sections = @($headers | ForEach-Object {
+        if ($_ -match '^\s+(\.[A-Za-z0-9_]+)\s+name\s*$') { $Matches[1] }
+    })
+    $debugDirectories = @($headers | Select-String 'Debug Directories').Count
+    $coffSymbols = @($headers | Select-String 'COFF Symbols').Count
+    if ($debugDirectories -gt 0) {
+        throw "debug directory present in $Path"
+    }
+
+    $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
+    $rustcPaths = ([regex]::Matches($text, '/rustc/[0-9a-f]+/')).Count
+    $pdbPaths = ([regex]::Matches($text, '[A-Za-z0-9_.-]+\.pdb')).Count
+    $time = Get-PeTime $Path
+    $dateLike = ($time -ge 1577836800 -and $time -le 2208988800)
+    $leaks = @(Get-Leaks $Path $Copy)
+    if ($leaks.Count -gt 0) {
+        throw ("path leaks in $Path : " + ($leaks -join ', '))
+    }
+    $pdbFiles = @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -Filter '*.pdb' -ErrorAction SilentlyContinue).Count
+    if ($pdbFiles -gt 0) {
+        throw "PDB files present beside $Path"
+    }
+
+    return [pscustomobject]@{
+        size = $size
+        max_size = $MaxSize
+        imports = @($imports)
+        sections = @($sections)
+        debug_directory = $debugDirectories
+        coff_symbols = $coffSymbols
+        pdb_paths = $pdbPaths
+        pdb_files = $pdbFiles
+        rustc_paths = $rustcPaths
+        pe_time = ('0x{0:X8}' -f $time)
+        date_like = $dateLike
+        leaks = @($leaks)
+    }
+}
+
 function Get-LinkInfo() {
     $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
     $vswhere = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -57,7 +114,7 @@ function Get-LinkInfo() {
     return $result
 }
 
-function Build-One([string]$Copy) {
+function Build-One([string]$Copy, [string]$Dumpbin, [int]$MaxSize) {
     $env:CARGO_TARGET_DIR = Join-Path $Copy 'target'
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=/Brepro -C link-arg=/DEBUG:NONE --remap-path-prefix=$Copy=/wshim"
 
@@ -74,15 +131,15 @@ function Build-One([string]$Copy) {
     $release = Join-Path $env:CARGO_TARGET_DIR (Join-Path $target 'release')
     $exeC = Join-Path $release 'wshim-c.exe'
     $exeW = Join-Path $release 'wshim-w.exe'
+    $infoC = Get-BinaryInfo $exeC $Dumpbin $Copy $MaxSize
+    $infoW = Get-BinaryInfo $exeW $Dumpbin $Copy $MaxSize
     return [pscustomobject]@{
         C = $exeC
         W = $exeW
         HashC = (Get-FileHash -LiteralPath $exeC -Algorithm SHA256).Hash
         HashW = (Get-FileHash -LiteralPath $exeW -Algorithm SHA256).Hash
-        TimeC = Get-PeTime $exeC
-        Pdb = @(Get-ChildItem -LiteralPath $release -Filter '*.pdb' -ErrorAction SilentlyContinue).Count
-        Leaks = @(Get-Leaks $exeC $Copy)
-        SizeC = (Get-Item -LiteralPath $exeC).Length
+        InfoC = $infoC
+        InfoW = $infoW
     }
 }
 
@@ -94,15 +151,22 @@ $env:RUSTUP_AUTO_INSTALL = '1'
 Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
 Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
 
+$link = Get-LinkInfo
+if (-not $link.visual_studio) {
+    throw 'Visual Studio installation not found'
+}
+$dumpbin = Get-ChildItem -Path (Join-Path $link.visual_studio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $dumpbin) {
+    throw 'dumpbin.exe not found'
+}
+$dumpbinPath = $dumpbin.FullName
+
 New-Copy $copyA
 New-Copy $copyB
-$a = Build-One $copyA
-$b = Build-One $copyB
+$a = Build-One $copyA $dumpbinPath $MaxSize
+$b = Build-One $copyB $dumpbinPath $MaxSize
 if ($a.HashC -ne $b.HashC -or $a.HashW -ne $b.HashW) {
     throw 'A/B hashes differ'
-}
-if ($a.Leaks.Count -gt 0 -or $b.Leaks.Count -gt 0) {
-    throw ('path leaks: ' + (@($a.Leaks + $b.Leaks) -join ','))
 }
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
@@ -120,7 +184,6 @@ $rustc = ((& rustc -Vv) -join ' | ')
 $cargo = (& cargo -V)
 Pop-Location
 $toolchainName = ($activeToolchain -split '\s+')[0]
-$link = Get-LinkInfo
 $manifest = [ordered]@{
     tag = $Tag
     commit = $commit
@@ -137,10 +200,12 @@ $manifest = [ordered]@{
     flags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
     hash_c = $a.HashC
     hash_w = $a.HashW
-    pe_time_c = ('0x{0:X8}' -f $a.TimeC)
-    pdb = $a.Pdb
-    leaks = @($a.Leaks)
-    size_c = $a.SizeC
+    pe_time_c = $a.InfoC.pe_time
+    pdb = $a.InfoC.pdb_files
+    leaks = @($a.InfoC.leaks)
+    size_c = $a.InfoC.size
+    binary_c = $a.InfoC
+    binary_w = $a.InfoW
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDir 'manifest.json') -Encoding utf8
 

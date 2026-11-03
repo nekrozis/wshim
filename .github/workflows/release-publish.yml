@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-2025
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
@@ -53,6 +53,19 @@ jobs:
         run: |
           $manifest = Get-Content downloaded/manifest.json | ConvertFrom-Json
           if ($manifest.tag -ne $env:TAG) { throw "manifest tag mismatch" }
+          $allowed = @('KERNEL32.dll', 'ntdll.dll', 'api-ms-win-core-synch-l1-2-0.dll')
+          foreach ($b in @($manifest.binary_c, $manifest.binary_w)) {
+            if ($b.pdb_files -ne 0) { throw 'PDB files present' }
+            if ($b.debug_directory -ne 0) { throw 'debug directory present' }
+            if ($b.size -gt $b.max_size) { throw "size budget exceeded: $($b.size) > $($b.max_size)" }
+            if (@($b.leaks).Count -ne 0) { throw 'path leaks present' }
+            $unexpected = @($b.imports | Where-Object { $allowed -notcontains $_ })
+            if ($unexpected.Count -ne 0) { throw "unexpected imports: $($unexpected -join ',')" }
+            if ($b.date_like) { Write-Warning "PE timestamp looks date-like: $($b.pe_time)" }
+            if ($b.coff_symbols -gt 0) { Write-Host 'reducible: COFF symbols present' }
+            if ($b.rustc_paths -gt 0) { Write-Host "rustc path strings: $($b.rustc_paths)" }
+            Write-Host "binary size=$($b.size) sections=$($b.sections -join ',') imports=$($b.imports -join ',')"
+          }
           $expected = @{}
           foreach ($line in Get-Content downloaded/sha256.txt) {
             if ($line -match '^\s*([0-9A-Fa-f]{64})\s+(\S+)\s*$') {
@@ -115,6 +128,8 @@ jobs:
           - SHA-256:
             - `wshim-c.exe`: $($manifest.hash_c)
             - `wshim-w.exe`: $($manifest.hash_w)
+          - Size: $($manifest.binary_c.size) bytes; imports: $($manifest.binary_c.imports -join ', '); sections: $($manifest.binary_c.sections -join ', ')
+          - PDB files: $($manifest.binary_c.pdb_files); debug directory: $($manifest.binary_c.debug_directory); COFF symbols: $($manifest.binary_c.coff_symbols); /rustc/ path strings: $($manifest.binary_c.rustc_paths); PE timestamp: $($manifest.binary_c.pe_time)
           - Attestation: `gh attestation verify <file> --repo $env:GITHUB_REPOSITORY --signer-workflow $env:GITHUB_REPOSITORY/.github/workflows/release-build.yml --source-digest $($manifest.commit) --source-ref refs/tags/$env:TAG`
 
           Reproducibility: the build CI performed A/B builds; this release CI rebuilt and compared. This is same-image, best-effort reproducibility; cross-environment bit-for-bit identity is not guaranteed.
