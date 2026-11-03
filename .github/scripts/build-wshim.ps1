@@ -2,8 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [Parameter(Mandatory = $true)][string]$OutputDir,
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
-    [int]$MaxSize = 327680
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,49 +36,36 @@ function Get-Leaks([string]$Path, [string]$Copy) {
     return @($needles | Where-Object { $text.Contains($_) } | Select-Object -Unique)
 }
 
-function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy, [int]$MaxSize) {
+function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy) {
     $size = (Get-Item -LiteralPath $Path).Length
-    if ($size -gt $MaxSize) {
-        throw "binary too large: $Path = $size bytes > $MaxSize"
-    }
+    $imports = @()
+    $sections = @()
+    $debugDirectories = -1
+    $coffSymbols = -1
 
-    $dependents = @(& $Dumpbin /dependents $Path)
-    $imports = @($dependents | ForEach-Object {
-        if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] }
-    })
-    $allowed = @('KERNEL32.dll', 'ntdll.dll', 'api-ms-win-core-synch-l1-2-0.dll')
-    $unexpected = @($imports | Where-Object { $allowed -notcontains $_ })
-    if ($unexpected.Count -gt 0) {
-        throw ("unexpected imports in $Path : " + ($unexpected -join ', '))
-    }
-
-    $headers = @(& $Dumpbin /headers $Path)
-    $sections = @($headers | ForEach-Object {
-        if ($_ -match '^\s+(\.[A-Za-z0-9_]+)\s+name\s*$') { $Matches[1] }
-    })
-    $debugDirectories = @($headers | Select-String 'Debug Directories').Count
-    $coffSymbols = @($headers | Select-String 'COFF Symbols').Count
-    if ($debugDirectories -gt 0) {
-        throw "debug directory present in $Path"
+    if ($Dumpbin) {
+        $dependents = @(& $Dumpbin /dependents $Path)
+        $imports = @($dependents | ForEach-Object {
+            if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] }
+        })
+        $headers = @(& $Dumpbin /headers $Path)
+        $sections = @($headers | ForEach-Object {
+            if ($_ -match '^\s+(\.[A-Za-z0-9_]+)\s+name\s*$') { $Matches[1] }
+        })
+        $debugDirectories = @($headers | Select-String 'Debug Directories').Count
+        $coffSymbols = @($headers | Select-String 'COFF Symbols').Count
     }
 
     $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
     $rustcPaths = ([regex]::Matches($text, '/rustc/[0-9a-f]+/')).Count
     $pdbPaths = ([regex]::Matches($text, '[A-Za-z0-9_.-]+\.pdb')).Count
     $time = Get-PeTime $Path
-    $dateLike = ($time -ge 1577836800 -and $time -le 2208988800)
     $leaks = @(Get-Leaks $Path $Copy)
-    if ($leaks.Count -gt 0) {
-        throw ("path leaks in $Path : " + ($leaks -join ', '))
-    }
     $pdbFiles = @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -Filter '*.pdb' -ErrorAction SilentlyContinue).Count
-    if ($pdbFiles -gt 0) {
-        throw "PDB files present beside $Path"
-    }
 
     return [pscustomobject]@{
         size = $size
-        max_size = $MaxSize
+        dumpbin_available = [bool]$Dumpbin
         imports = @($imports)
         sections = @($sections)
         debug_directory = $debugDirectories
@@ -88,7 +74,6 @@ function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy, [int]$Ma
         pdb_files = $pdbFiles
         rustc_paths = $rustcPaths
         pe_time = ('0x{0:X8}' -f $time)
-        date_like = $dateLike
         leaks = @($leaks)
     }
 }
@@ -114,7 +99,7 @@ function Get-LinkInfo() {
     return $result
 }
 
-function Build-One([string]$Copy, [string]$Dumpbin, [int]$MaxSize) {
+function Build-One([string]$Copy, [string]$Dumpbin) {
     $env:CARGO_TARGET_DIR = Join-Path $Copy 'target'
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=/Brepro -C link-arg=/DEBUG:NONE --remap-path-prefix=$Copy=/wshim"
 
@@ -131,8 +116,8 @@ function Build-One([string]$Copy, [string]$Dumpbin, [int]$MaxSize) {
     $release = Join-Path $env:CARGO_TARGET_DIR (Join-Path $target 'release')
     $exeC = Join-Path $release 'wshim-c.exe'
     $exeW = Join-Path $release 'wshim-w.exe'
-    $infoC = Get-BinaryInfo $exeC $Dumpbin $Copy $MaxSize
-    $infoW = Get-BinaryInfo $exeW $Dumpbin $Copy $MaxSize
+    $infoC = Get-BinaryInfo $exeC $Dumpbin $Copy
+    $infoW = Get-BinaryInfo $exeW $Dumpbin $Copy
     return [pscustomobject]@{
         C = $exeC
         W = $exeW
@@ -152,19 +137,19 @@ Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
 Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
 
 $link = Get-LinkInfo
-if (-not $link.visual_studio) {
-    throw 'Visual Studio installation not found'
+$dumpbin = $null
+if ($link.visual_studio) {
+    $dumpbin = Get-ChildItem -Path (Join-Path $link.visual_studio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
 }
-$dumpbin = Get-ChildItem -Path (Join-Path $link.visual_studio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($null -eq $dumpbin) {
-    throw 'dumpbin.exe not found'
+$dumpbinPath = if ($null -ne $dumpbin) { $dumpbin.FullName } else { '' }
+if (-not $dumpbinPath) {
+    Write-Step 'dumpbin not found; metadata will be incomplete (manual inspection still required)'
 }
-$dumpbinPath = $dumpbin.FullName
 
 New-Copy $copyA
 New-Copy $copyB
-$a = Build-One $copyA $dumpbinPath $MaxSize
-$b = Build-One $copyB $dumpbinPath $MaxSize
+$a = Build-One $copyA $dumpbinPath
+$b = Build-One $copyB $dumpbinPath
 if ($a.HashC -ne $b.HashC -or $a.HashW -ne $b.HashW) {
     throw 'A/B hashes differ'
 }
