@@ -1,0 +1,48 @@
+name: release-build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (for example v0.2.0)
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.1-x86_64-pc-windows-msvc --profile minimal --no-self-update
+
+      - name: Build two independent paths
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ./.github/scripts/build-wshim.ps1 -Tag $env:TAG -OutputDir artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshim-${{ inputs.tag || github.ref_name }}
+          path: artifacts
+          if-no-files-found: error
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/wshim-c.exe
+            artifacts/wshim-w.exe
