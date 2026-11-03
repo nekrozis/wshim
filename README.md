@@ -1,58 +1,119 @@
-# Windows Symlink Shim
+# wshim
 
-## Introduction
+A minimal Windows launcher that keeps one directory on `PATH` while each
+command resolves to an absolute target outside that directory.
 
-Windows Shim is a mechanism designed to simplify the process of launching executable files while addressing some of the limitations associated with symbolic links. By using Shim, you can more efficiently and reliably manage executable files and their dependencies, avoiding the path management and DLL loading issues that can arise when using symbolic links.
-
-This project provides a cleaner, more streamlined approach to launching executable files, avoiding the problems symbolic links might cause when handling complex dependencies, especially when dynamically loading DLLs.
-
-## Why Shim is Needed?
-
-On Windows systems, executable file paths often need to be added to the `PATH` environment variable to make running programs easier. However, this practice leads to the `PATH` variable growing larger and more difficult to manage, as more programs are added. Additionally, traditional symbolic links have their own limitations, particularly when it comes to dynamically loading DLLs, as they cannot effectively handle program dependencies and path-related issues.
-
-The Shim mechanism provides an intermediary layer that centralizes the management of executable files, avoiding these problems. It helps reduce confusion in the `PATH` environment variable and offers better management of multiple software executables.
-
-## Why Not Use Symbolic Links?
-
-Symbolic links are suitable for statically compiled programs because these programs do not rely on DLLs in their own paths. However, for programs that need to dynamically load DLLs, symbolic links may not work as expected, especially for those programs that rely on DLLs located in their own directory. Symbolic links do not handle the program's own dependency paths, which means that at runtime, the program may fail to find and load its own DLLs, causing startup failures.
-
-Unlike symbolic links, the Shim mechanism is better suited for managing these dynamic dependencies and can centralize the management of executable files, helping to avoid the issues caused by path management confusion.
-
-## How to Use the Shim
-
-### Step 1: Create a Symbolic Link in the Directory Where `shim.exe` is Located
-
-First, you need to create a symbolic link in the directory where the `shim.exe` binary is located that points to the actual target executable. This symbolic link will act as a configuration file, which Shim will use to parse and correctly launch the target program. This design is intended to be compatible with package managers (such as Winget) that manage programs via symbolic links.
-
-**Example**:
-```console
-mklink "C:\path\to\shim\my_program.exe" "C:\path\to\target\program.exe"
+```
+C:\bin\
+  python.exe          hard link to wshim-c.exe
+  node.exe            hard link to wshim-c.exe
+  code.exe            hard link to wshim-w.exe
+  .ref\
+    python.exe        symbolic link -> C:\Python312\python.exe
+    node.exe          symbolic link -> C:\Program Files\nodejs\node.exe
+    code.exe          symbolic link -> C:\Program Files\Microsoft VS Code\Code.exe
 ```
 
-### Step 2: Create a Symbolic Link to the Shim Executable
+`<dir>\<name>.exe` is the shim. It reads `<dir>\.ref\<name>.exe`, requires a
+symbolic link, and launches the link target. The reference name is the shim's
+file name including its extension.
 
-Next, you need to create a symbolic link to the Shim launcher program. *The name of this symbolic link must match the name of the symbolic link created in Step 1.*
+## Contract
 
-**Example**:
-```console
-mklink "C:\bin\my_program.exe" "C:\path\to\shim\shim.exe"
+- The `.ref` entry must be a symbolic link. A copy or hard link there is a
+  contract violation and fails when the link is read.
+- The link target must be absolute (`Path::is_absolute`), otherwise the shim
+  panics. The target is not checked for existence; `CreateProcess` reports that.
+- Arguments, environment, standard handles and the caller's working directory
+  are inherited. Arguments are rebuilt with the standard CRT-compatible
+  quoting, so the child sees the same argument values.
+- The child's `argv[0]`, `GetModuleFileName`, DLL application directory and
+  relative resource lookup all refer to the target path.
+- The shim waits and exits with the child's exit code, including negative and
+  crash codes.
+- The shim produces no output of its own. Failures panic.
+
+## Console and GUI variants
+
+`wshim-c` is a console-subsystem image and `wshim-w` is a GUI-subsystem image.
+They share the same library; the entry points differ only in the subsystem
+attribute.
+
+Use `wshim-c` for console programs. When the caller has a console, the child
+inherits it, `cmd` waits for the child, and Ctrl+C reaches both processes.
+
+Use `wshim-w` for GUI programs. No console is attached. From an interactive
+command prompt, `cmd` does not wait for a GUI-subsystem image. Inside a batch
+script or a `cmd /c` command line, `cmd` waits for GUI applications, so it also
+waits for `wshim-w`; that matches launching the GUI target directly. Do not launch a console program
+through `wshim-w`: the child will allocate its own console window.
+
+## Ctrl+C
+
+The shim installs a console control handler before creating the child and
+returns TRUE for every event. The console delivers Ctrl+C and Ctrl+Break to
+every process attached to it, so the child still receives them; returning TRUE
+only keeps the shim alive until the child exits.
+
+`SetConsoleCtrlHandler(NULL, TRUE)` is deliberately not used: the "ignore
+Ctrl+C" attribute is inherited by child processes, which would disable Ctrl+C
+for the program being launched.
+
+Closing the console terminates both processes. The shim does not use a job
+object, so a child can outlive a shim that was killed externally.
+
+## Build
+
+```
+cargo build --release
 ```
 
-### Step 3: Run the Program
+This produces `target\release\wshim-c.exe` and `target\release\wshim-w.exe`.
+Cross-compiling from Linux with the GNU target works with
+`x86_64-w64-mingw32-gcc`.
 
-Now, you can run the program by executing the symbolic link created in Step 2 (which points to `shim.exe`), just like you would a regular executable.
+The release profile uses `panic = "abort"`, speed optimization, fat LTO and one
+codegen unit. The crate has no dependencies. The shim's latency is dominated by
+process creation and filesystem calls, so the optimization level is not
+expected to be measurable end to end.
 
-**Example**:
-```console
-C:\bin\my_program.exe
-```
+The profile leaves `strip` at Cargo's default (`debuginfo`), so debug sections
+are removed without a post-link tool. The symbol table remains; strip the PE
+after linking if distribution size matters.
 
-Shim will:
+`.cargo/config.toml` enables the static CRT (`+crt-static`) for the Windows
+targets. With MSVC this removes the `VCRUNTIME140.dll` / UCRT dependency, so the
+shim does not require the Visual C++ Redistributable. With GNU the imports stay
+`msvcrt.dll` plus system DLLs; `msvcrt.dll` ships with Windows. Static CRT has a
+negligible effect on launch latency; its value is removing a startup
+dependency. The trade-offs are a slightly larger image and CRT security fixes
+that arrive only on rebuild. The crate has no dependencies, proc macros, or
+dylibs, so `+crt-static` has no known conflict.
 
-1. Parse the filename of the symbolic link that calls shim.exe.
-2. Read the target of the symbolic link in its own directory that has the same name obtained in step 1, which points to the program to be executed.
-3. Launch the target program (either as a GUI or a console application, depending on the program type).
+## Managing a shim directory
 
-## License
+- Create the shim as a hard link to the matching variant when both paths are on
+  one volume; otherwise copy. Hard links share one image, so updating the
+  variant requires recreating every link.
+- Create `.ref\<name>.exe` as a file symbolic link with an absolute target.
+  Creating symbolic links requires Developer Mode or
+  `SeCreateSymbolicLinkPrivilege`, and `.ref` must be on a filesystem that
+  supports reparse points, normally NTFS.
+- Choose the variant from the target's PE subsystem: `3` is console, `2` is
+  GUI.
+- Validate the link when creating it; the shim intentionally has no fallback.
 
-This project is open-source under the BSD 3-Clause License. For more information, please refer to the [LICENSE](LICENSE.txt) file.
+## Limits
+
+- `CreateProcess` does not elevate. A target whose manifest requests
+  administrator rights fails with error 740. Use a shell-level elevation path,
+  or do not shim such targets.
+- `.ref` links are absolute by contract, so moving the shim directory requires
+  recreating them.
+- The child sees the target path as `argv[0]`. Programs that dispatch on the
+  invoked name (busybox-style) are not supported.
+- A target ending in `.bat` or `.cmd` is launched through `cmd.exe` by Rust's
+  standard library, which re-parses its arguments. Prefer executable targets.
+- Each invocation adds one process creation. The measured latency is dominated
+  by `CreateProcess`; the shim itself only calls `GetModuleFileName`, reads one
+  reparse point, and forwards arguments.

@@ -1,0 +1,23 @@
+[package]
+name = "wshim"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wshim-c"
+path = "src/bin/wshim-c.rs"
+
+[[bin]]
+name = "wshim-w"
+path = "src/bin/wshim-w.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,8 +1,1 @@
-target/
-**/target/
-.vscode/
-.idea/
-*.swp
-*.swo
-*.bak
-*.tmp
+/target
