@@ -1,0 +1,217 @@
+name: reproducible-build
+
+on:
+  push:
+    branches: [repro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.flavor }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        flavor: [msvc, gnu]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchains
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.1-x86_64-pc-windows-msvc --profile minimal --no-self-update
+          rustup toolchain install 1.99.1-x86_64-pc-windows-gnu --profile minimal --no-self-update
+
+      - name: Show build environment
+        shell: pwsh
+        run: |
+          "ImageOS=$env:ImageOS"
+          "ImageVersion=$env:ImageVersion"
+          rustup toolchain list
+          rustup run 1.99.1-x86_64-pc-windows-msvc rustc -Vv
+          rustup run 1.99.1-x86_64-pc-windows-gnu rustc -Vv
+          $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $vswhere = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (Test-Path $vswhere) {
+            $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            "VS=$vs"
+            $link = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($link) { "link=$($link.FullName) version=$($link.VersionInfo.FileVersion)" }
+          }
+          Get-ChildItem (Join-Path $pf86 'Windows Kits\10\Include') -ErrorAction SilentlyContinue |
+            ForEach-Object { "SDK=$($_.Name)" }
+
+      - name: Build two paths and compare
+        shell: pwsh
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+          OS_LABEL: ${{ matrix.os }}
+          ART_NAME: ${{ matrix.os }}-${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ($env:FLAVOR -eq 'msvc') {
+            $target = 'x86_64-pc-windows-msvc'
+            $toolchain = '1.99.1-x86_64-pc-windows-msvc'
+            $extra = '-C link-arg=/Brepro -C link-arg=/DEBUG:NONE'
+          } else {
+            $target = 'x86_64-pc-windows-gnu'
+            $toolchain = '1.99.1-x86_64-pc-windows-gnu'
+            $extra = '-C link-arg=-Wl,--no-insert-timestamp'
+          }
+
+          $env:SOURCE_DATE_EPOCH = '0'
+          $env:CARGO_INCREMENTAL = '0'
+          Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
+          Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
+          Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS -ErrorAction SilentlyContinue
+
+          $root = Join-Path $env:RUNNER_TEMP 'wshim-repro'
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          $copies = @{}
+          foreach ($name in @('a', 'b')) {
+            $dst = Join-Path $root $name
+            New-Item -ItemType Directory -Path $dst -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Cargo.toml') -Destination $dst
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Cargo.lock') -Destination $dst
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'rust-toolchain.toml') -Destination $dst
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'src') -Destination $dst -Recurse
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE '.cargo') -Destination $dst -Recurse
+            $copies[$name] = $dst
+          }
+
+          function Get-PeTime([string]$Path) {
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            return [BitConverter]::ToUInt32($bytes, $pe + 8)
+          }
+
+          function Get-Leaks([string]$Path, [string]$Copy) {
+            $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
+            $needles = @('C:\Users\', '\.rustup\', 'rust-src', 'rustup', 'hostedtoolcache', 'C:\Program Files', '/home/', '/tmp/', $Copy)
+            return @($needles | Where-Object { $text.Contains($_) } | Select-Object -Unique)
+          }
+
+          $results = @{}
+          foreach ($name in @('a', 'b')) {
+            $dst = $copies[$name]
+            $env:CARGO_TARGET_DIR = Join-Path $dst 'target'
+            $flags = "-C target-feature=+crt-static $extra --remap-path-prefix=$dst=/wshim"
+            if ($env:FLAVOR -eq 'msvc') {
+              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+            } else {
+              $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = $flags
+            }
+
+            Push-Location $dst
+            try {
+              & rustup run $toolchain cargo build --release --locked --target $target -j 1
+              if ($LASTEXITCODE -ne 0) { throw "cargo build failed in $dst" }
+            } finally {
+              Pop-Location
+            }
+
+            $rel = Join-Path $env:CARGO_TARGET_DIR (Join-Path $target 'release')
+            $exeC = Join-Path $rel 'wshim-c.exe'
+            $exeW = Join-Path $rel 'wshim-w.exe'
+            $results[$name] = [pscustomobject]@{
+              C = (Get-FileHash -LiteralPath $exeC -Algorithm SHA256).Hash
+              W = (Get-FileHash -LiteralPath $exeW -Algorithm SHA256).Hash
+              Time = Get-PeTime $exeC
+              Pdb = @(Get-ChildItem -LiteralPath $rel -Filter '*.pdb' -ErrorAction SilentlyContinue).Count
+              Leaks = @(Get-Leaks $exeC $dst)
+              CPath = $exeC
+              WPath = $exeW
+            }
+          }
+
+          foreach ($name in @('a', 'b')) {
+            if ($results[$name].Leaks.Count -gt 0) {
+              throw ("path leak in " + $name + ": " + (@($results[$name].Leaks) -join ','))
+            }
+          }
+          if ($results['a'].C -ne $results['b'].C -or $results['a'].W -ne $results['b'].W) {
+            throw 'A/B hashes differ'
+          }
+
+          "A==B: c=$($results['a'].C) w=$($results['a'].W)"
+          "time-c=0x$('{0:X8}' -f $results['a'].Time) pdb=$($results['a'].Pdb)"
+
+          $art = Join-Path $env:GITHUB_WORKSPACE (Join-Path 'artifacts' $env:ART_NAME)
+          New-Item -ItemType Directory -Path $art -Force | Out-Null
+          Copy-Item -LiteralPath $results['a'].CPath -Destination (Join-Path $art 'wshim-c.exe')
+          Copy-Item -LiteralPath $results['a'].WPath -Destination (Join-Path $art 'wshim-w.exe')
+          @(
+            "$($results['a'].C)  wshim-c.exe",
+            "$($results['a'].W)  wshim-w.exe"
+          ) | Set-Content -LiteralPath (Join-Path $art 'sha256.txt') -Encoding ascii
+
+          $manifest = [ordered]@{
+            os = $env:OS_LABEL
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            flavor = $env:FLAVOR
+            target = $target
+            toolchain = $toolchain
+            rustc = ((& rustup run $toolchain rustc -Vv) -join ' | ')
+            hash_c = $results['a'].C
+            hash_w = $results['a'].W
+            pe_time_c = ('0x{0:X8}' -f $results['a'].Time)
+            pdb = $results['a'].Pdb
+            leaks = @($results['a'].Leaks)
+          }
+          $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $art 'manifest.json') -Encoding utf8
+          Get-ChildItem -LiteralPath $art | Format-Table -AutoSize
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshim-${{ matrix.os }}-${{ matrix.flavor }}
+          path: artifacts/${{ matrix.os }}-${{ matrix.flavor }}
+          if-no-files-found: error
+
+  summarize:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wshim-*
+          path: artifacts
+
+      - name: Compare artifacts
+        run: |
+          python3 - <<'PY'
+          import collections
+          import glob
+          import json
+
+          rows = []
+          for path in glob.glob('artifacts/**/manifest.json', recursive=True):
+              with open(path, encoding='utf-8') as handle:
+                  rows.append(json.load(handle))
+
+          for row in sorted(rows, key=lambda item: (item['flavor'], item['os'])):
+              print(
+                  f"{row['flavor']:4} {row['os']:12} {row.get('image_version','?'):20} "
+                  f"c={row['hash_c'][:16]} w={row['hash_w'][:16]} "
+                  f"t={row['pe_time_c']} pdb={row['pdb']} leaks={row['leaks']}"
+              )
+
+          for flavor in ('msvc', 'gnu'):
+              subset = [row for row in rows if row['flavor'] == flavor]
+              if len(subset) < 2:
+                  continue
+              hashes_c = {row['hash_c'] for row in subset}
+              hashes_w = {row['hash_w'] for row in subset}
+              print(
+                  f"{flavor}: cross-runner "
+                  f"c={'MATCH' if len(hashes_c) == 1 else 'MISMATCH'} "
+                  f"w={'MATCH' if len(hashes_w) == 1 else 'MISMATCH'}"
+              )
+          PY
