@@ -124,7 +124,7 @@ jobs:
 
           Reproducibility: the build CI performed A/B builds; this release CI rebuilt and compared. This is same-image, best-effort reproducibility; cross-environment bit-for-bit identity is not guaranteed.
 
-          This is the Rust rewrite; v1.x is the old C++ shim.
+          This is the Rust rewrite; cpp-v1.x is the old C++ shim.
           "@
           Set-Content -LiteralPath release-notes.md -Value $notes -Encoding utf8
           gh release create $env:TAG --draft --verify-tag --title "wshim $env:TAG" --notes-file release-notes.md `
