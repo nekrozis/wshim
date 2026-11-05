@@ -13,9 +13,11 @@ mod ctrl;
 
 /// Runs the shim. Never returns.
 ///
-/// Errors are contract violations or launch failures and surface as panics:
-/// the program has no output of its own.
+/// Errors are contract violations or launch failures and surface as silent
+/// panics: the program has no output of its own.
 pub fn run() -> ! {
+    // The contract forbids output of our own, including panic messages.
+    std::panic::set_hook(Box::new(|_| {}));
     ctrl::ignore();
 
     let exe = env::current_exe().unwrap();

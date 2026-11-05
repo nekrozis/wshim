@@ -22,7 +22,7 @@ file name including its extension.
 
 - The `.ref` entry must be a symbolic link. A copy or hard link there is a
   contract violation and fails when the link is read.
-- The link target must be absolute, otherwise the shim panics.
+- The link target must be absolute; a relative target is rejected.
 - Arguments, environment, standard handles and the caller's working directory
   are inherited; the child sees the same argument values.
 - The child runs from the link target's absolute path, so it sees the target
@@ -30,7 +30,7 @@ file name including its extension.
   normally.
 - The shim waits and exits with the child's exit code, including negative and
   crash codes.
-- The shim produces no output of its own. Failures panic.
+- The shim produces no output of its own. Failures end the process silently.
 
 Each invocation adds one process start; the shim itself does no work while the
 child runs.
