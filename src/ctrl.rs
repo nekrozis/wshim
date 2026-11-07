@@ -10,8 +10,8 @@ mod imp {
         ) -> i32;
     }
 
-    // The event also reaches the child, which shares this console. Returning
-    // TRUE only prevents this process from terminating before the child exits.
+    // The child shares this console and receives the event itself. Returning
+    // TRUE only keeps this process alive until the child exits.
     unsafe extern "system" fn swallow(_: u32) -> i32 {
         1
     }

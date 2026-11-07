@@ -8,19 +8,19 @@ C:\bin\
   python.exe          copy or hard link to wshim-c.exe
   node.exe            copy or hard link to wshim-c.exe
   code.exe            copy or hard link to wshim-w.exe
-  .ref\
+  _ref\
     python.exe        symbolic link -> C:\Python312\python.exe
     node.exe          symbolic link -> C:\Program Files\nodejs\node.exe
     code.exe          symbolic link -> C:\Program Files\Microsoft VS Code\Code.exe
 ```
 
-`<dir>\<name>.exe` is the shim. It reads `<dir>\.ref\<name>.exe`, requires a
+`<dir>\<name>.exe` is the shim. It reads `<dir>\_ref\<name>.exe`, requires a
 symbolic link, and launches the link target. The reference name is the shim's
 file name including its extension.
 
 ## Contract
 
-- The `.ref` entry must be a symbolic link. A copy or hard link there is a
+- The `_ref` entry must be a symbolic link. A copy or hard link there is a
   contract violation and fails when the link is read.
 - The link target must be absolute; a relative target is rejected.
 - Arguments, environment, standard handles and the caller's working directory
@@ -96,12 +96,14 @@ dylibs, so `+crt-static` has no known conflict.
 
 ## Managing a shim directory
 
+- Layouts from 0.2.x used `.ref`; rename it to `_ref` and replace the shims
+  with 0.3.0 or later.
 - Create the shim as a hard link to the matching variant, or copy it when the
   paths are on different volumes. Both behave identically; a hard link only
   saves space, and updating the variant then means recreating every link.
-- Create `.ref\<name>.exe` as a file symbolic link with an absolute target.
+- Create `_ref\<name>.exe` as a file symbolic link with an absolute target.
   Creating symbolic links requires Developer Mode or
-  `SeCreateSymbolicLinkPrivilege`, and `.ref` must be on a filesystem that
+  `SeCreateSymbolicLinkPrivilege`, and `_ref` must be on a filesystem that
   supports reparse points, normally NTFS.
 - Choose the variant from the target's PE subsystem: `3` is console, `2` is
   GUI.
@@ -111,10 +113,10 @@ dylibs, so `+crt-static` has no known conflict.
 
 - A target that requests administrator rights fails with error 740 unless the
   shim itself is started elevated, for example through Windows `sudo`.
-- `.ref` links are absolute by contract, so moving the shim directory requires
+- `_ref` links are absolute by contract, so moving the shim directory requires
   recreating them.
 - Programs that dispatch on their file name (busybox-style multicall) work only
-  when the link target itself carries the expected name; point the `.ref` entry
+  when the link target itself carries the expected name; point the `_ref` entry
   at such an alias.
 - `.bat` and `.cmd` targets are started through `cmd.exe`, which re-parses
   their arguments. Prefer executable targets.

@@ -1,9 +1,5 @@
-//! A transparent launcher for Windows.
-//!
-//! The executable resolves `<its own directory>\.ref\<its own file name>` as a
-//! symbolic link and launches the link target with the same arguments,
-//! environment, standard handles, and working directory. It then exits with
-//! the child's exit code.
+//! A minimal Windows launcher. It resolves `_ref\<its own file name>` as a
+//! symbolic link and runs the link target.
 
 use std::env;
 use std::fs;
@@ -12,11 +8,8 @@ use std::process::{self, Command};
 mod ctrl;
 
 /// Runs the shim. Never returns.
-///
-/// Errors are contract violations or launch failures and surface as silent
-/// panics: the program has no output of its own.
 pub fn run() -> ! {
-    // The contract forbids output of our own, including panic messages.
+    // Failures must stay silent, including panic messages.
     std::panic::set_hook(Box::new(|_| {}));
     ctrl::ignore();
 
@@ -24,7 +17,7 @@ pub fn run() -> ! {
     let link = exe
         .parent()
         .unwrap()
-        .join(".ref")
+        .join("_ref")
         .join(exe.file_name().unwrap());
     let target = fs::read_link(link).unwrap();
 
