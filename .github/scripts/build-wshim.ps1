@@ -30,6 +30,22 @@ function Get-PeTime([string]$Path) {
     return [BitConverter]::ToUInt32($bytes, $pe + 8)
 }
 
+function Get-PeSections([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) {
+        throw "not a PE image: $Path"
+    }
+    $count = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $optionalSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+    $table = $pe + 24 + $optionalSize
+    $names = for ($i = 0; $i -lt $count; $i++) {
+        $offset = $table + $i * 40
+        [Text.Encoding]::ASCII.GetString($bytes, $offset, 8).TrimEnd([char]0)
+    }
+    return @($names)
+}
+
 function Get-Leaks([string]$Path, [string]$Copy) {
     $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
     $needles = @('C:\Users\', '\.rustup\', 'rust-src', 'rustup', 'hostedtoolcache', 'C:\Program Files', '/home/', '/tmp/', 'D:\a', $Copy)
@@ -39,7 +55,7 @@ function Get-Leaks([string]$Path, [string]$Copy) {
 function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy) {
     $size = (Get-Item -LiteralPath $Path).Length
     $imports = @()
-    $sections = @()
+    $sections = @(Get-PeSections $Path)
     $debugDirectories = -1
     $coffSymbols = -1
 
@@ -49,9 +65,6 @@ function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy) {
             if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] }
         })
         $headers = @(& $Dumpbin /headers $Path)
-        $sections = @($headers | ForEach-Object {
-            if ($_ -match '^\s+(\.[A-Za-z0-9_]+)\s+name\s*$') { $Matches[1] }
-        })
         $debugDirectories = @($headers | Select-String 'Debug Directories').Count
         $coffSymbols = @($headers | Select-String 'COFF Symbols').Count
     }
@@ -78,18 +91,18 @@ function Get-BinaryInfo([string]$Path, [string]$Dumpbin, [string]$Copy) {
     }
 }
 
-function Get-LinkInfo() {
+function Get-ToolchainInfo() {
     $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
     $vswhere = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
-    $result = [ordered]@{ visual_studio = ''; link_version = ''; sdks = @() }
+    $result = [ordered]@{ visual_studio = ''; msvc_toolsets = @(); sdks = @() }
     if (Test-Path -LiteralPath $vswhere) {
         $vs = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)[0]
         if ($vs) {
             $result.visual_studio = $vs
-            $link = Get-ChildItem -Path (Join-Path $vs 'VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($null -ne $link) {
-                $result.link_version = $link.VersionInfo.FileVersion
-            }
+            $result.msvc_toolsets = @(Get-ChildItem -Path (Join-Path $vs 'VC\Tools\MSVC\*') -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^[0-9]+\.[0-9]+\.[0-9]+$' } |
+                Sort-Object { [version]$_.Name } -Descending |
+                Select-Object -ExpandProperty Name)
         }
     }
     $sdkRoot = Join-Path $pf86 'Windows Kits\10\Include'
@@ -136,10 +149,10 @@ $env:RUSTUP_AUTO_INSTALL = '1'
 Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
 Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
 
-$link = Get-LinkInfo
+$toolchain = Get-ToolchainInfo
 $dumpbin = $null
-if ($link.visual_studio) {
-    $dumpbin = Get-ChildItem -Path (Join-Path $link.visual_studio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($toolchain.visual_studio) {
+    $dumpbin = Get-ChildItem -Path (Join-Path $toolchain.visual_studio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 $dumpbinPath = if ($null -ne $dumpbin) { $dumpbin.FullName } else { '' }
 if (-not $dumpbinPath) {
@@ -179,9 +192,9 @@ $manifest = [ordered]@{
     toolchain = $toolchainName
     rustc = $rustc
     cargo = $cargo
-    visual_studio = $link.visual_studio
-    link_version = $link.link_version
-    sdks = @($link.sdks)
+    visual_studio = $toolchain.visual_studio
+    msvc_toolsets = @($toolchain.msvc_toolsets)
+    sdks = @($toolchain.sdks)
     flags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
     hash_c = $a.HashC
     hash_w = $a.HashW
