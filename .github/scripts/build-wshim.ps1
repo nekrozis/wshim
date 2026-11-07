@@ -182,6 +182,8 @@ $rustc = ((& rustc -Vv) -join ' | ')
 $cargo = (& cargo -V)
 Pop-Location
 $toolchainName = ($activeToolchain -split '\s+')[0]
+$recordedFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+$recordedFlags = $recordedFlags.Replace($copyA, '<copy>').Replace($copyB, '<copy>')
 $manifest = [ordered]@{
     tag = $Tag
     commit = $commit
@@ -195,7 +197,7 @@ $manifest = [ordered]@{
     visual_studio = $toolchain.visual_studio
     msvc_toolsets = @($toolchain.msvc_toolsets)
     sdks = @($toolchain.sdks)
-    flags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+    flags = $recordedFlags
     hash_c = $a.HashC
     hash_w = $a.HashW
     pe_time_c = $a.InfoC.pe_time
